@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { Signatures } from '../src/resources/signatures.js';
 import { createSignatures } from '../src/index.js';
-import { SignatureVerificationError } from '../src/errors.js';
+import { CallbackError, SignatureVerificationError } from '../src/errors.js';
 
 /**
  * Compute signature matching the Go implementation for test verification.
@@ -423,6 +423,467 @@ describe('Signatures resource', () => {
         { signingKey: overrideKey },
       );
       expect(delivery.hookId).toBe('hook-override');
+    });
+  });
+
+  describe('async hooks enrichment', () => {
+    it('attaches ack/nack methods and URLs when callback headers are present', () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-async',
+        path: '/test',
+        data: { async: true },
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-async',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-async/ack?token=tok123',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-async/nack?token=tok123',
+      });
+
+      expect(delivery.ackUrl).toBe('https://api.posthook.io/v1/hooks/hook-async/ack?token=tok123');
+      expect(delivery.nackUrl).toBe('https://api.posthook.io/v1/hooks/hook-async/nack?token=tok123');
+      expect(typeof delivery.ack).toBe('function');
+      expect(typeof delivery.nack).toBe('function');
+    });
+
+    it('does not attach ack/nack when callback headers are absent', () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-sync',
+        path: '/test',
+        data: { async: false },
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-sync',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+      });
+
+      expect(delivery.ackUrl).toBeUndefined();
+      expect(delivery.nackUrl).toBeUndefined();
+      expect(delivery.ack).toBeUndefined();
+      expect(delivery.nack).toBeUndefined();
+    });
+
+    it('does not attach ack/nack when only one callback header is present', () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-partial',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-partial',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-partial/ack?token=tok',
+        // Missing posthook-nack-url
+      });
+
+      expect(delivery.ack).toBeUndefined();
+      expect(delivery.nack).toBeUndefined();
+    });
+
+    it('ack() calls fetch with POST to the ack URL', async () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-ack-fetch',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ data: { status: 'completed' } }), { status: 200 }),
+      );
+      vi.stubGlobal('fetch', mockFetch);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-ack-fetch',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-ack-fetch/ack?token=tok',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-ack-fetch/nack?token=tok',
+      });
+
+      await delivery.ack!();
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.posthook.io/v1/hooks/hook-ack-fetch/ack?token=tok',
+        expect.objectContaining({ method: 'POST' }),
+      );
+
+      vi.unstubAllGlobals();
+    });
+
+    it('nack() calls fetch with POST and JSON body', async () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-nack-fetch',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ data: { status: 'nacked' } }), { status: 200 }),
+      );
+      vi.stubGlobal('fetch', mockFetch);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-nack-fetch',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-nack-fetch/ack?token=tok',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-nack-fetch/nack?token=tok',
+      });
+
+      await delivery.nack!({ error: 'processing failed' });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.posthook.io/v1/hooks/hook-nack-fetch/nack?token=tok',
+        expect.objectContaining({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ error: 'processing failed' }),
+        }),
+      );
+
+      vi.unstubAllGlobals();
+    });
+  });
+
+  describe('ack/nack error handling', () => {
+    it('ack() throws CallbackError on 401', async () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-ack-err',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const mockFetch = vi.fn().mockResolvedValue(new Response('token expired', { status: 401 }));
+      vi.stubGlobal('fetch', mockFetch);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-ack-err',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-ack-err/ack?token=tok',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-ack-err/nack?token=tok',
+      });
+
+      await expect(delivery.ack!()).rejects.toThrow(CallbackError);
+      await expect(delivery.ack!()).rejects.toThrow('ack failed: 401');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('nack() throws CallbackError on 500', async () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-nack-err',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const mockFetch = vi.fn().mockResolvedValue(new Response('internal error', { status: 500 }));
+      vi.stubGlobal('fetch', mockFetch);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-nack-err',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-nack-err/ack?token=tok',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-nack-err/nack?token=tok',
+      });
+
+      await expect(delivery.nack!({ error: 'bad' })).rejects.toThrow(CallbackError);
+      await expect(delivery.nack!({ error: 'bad' })).rejects.toThrow('nack failed: 500');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('ack() returns applied:true on success', async () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-ack-ok',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ data: { status: 'completed' } }), { status: 200 }),
+      );
+      vi.stubGlobal('fetch', mockFetch);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-ack-ok',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-ack-ok/ack?token=tok',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-ack-ok/nack?token=tok',
+      });
+
+      const result = await delivery.ack!();
+      expect(result).toEqual({ applied: true, status: 'completed' });
+
+      vi.unstubAllGlobals();
+    });
+
+    it('ack() returns applied:false on idempotent no-op', async () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-ack-noop',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ data: { status: 'failed' } }), { status: 200 }),
+      );
+      vi.stubGlobal('fetch', mockFetch);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-ack-noop',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-ack-noop/ack?token=tok',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-ack-noop/nack?token=tok',
+      });
+
+      const result = await delivery.ack!();
+      expect(result).toEqual({ applied: false, status: 'failed' });
+
+      vi.unstubAllGlobals();
+    });
+
+    it('ack() returns applied:false on 404', async () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-ack-404',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const mockFetch = vi.fn().mockResolvedValue(new Response('not found', { status: 404 }));
+      vi.stubGlobal('fetch', mockFetch);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-ack-404',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-ack-404/ack?token=tok',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-ack-404/nack?token=tok',
+      });
+
+      const result = await delivery.ack!();
+      expect(result).toEqual({ applied: false, status: 'not_found' });
+
+      vi.unstubAllGlobals();
+    });
+
+    it('ack() returns applied:false on 409', async () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-ack-409',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const mockFetch = vi.fn().mockResolvedValue(new Response('conflict', { status: 409 }));
+      vi.stubGlobal('fetch', mockFetch);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-ack-409',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-ack-409/ack?token=tok',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-ack-409/nack?token=tok',
+      });
+
+      const result = await delivery.ack!();
+      expect(result).toEqual({ applied: false, status: 'conflict' });
+
+      vi.unstubAllGlobals();
+    });
+
+    it('ack() throws CallbackError on 410', async () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-ack-410',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const mockFetch = vi.fn().mockResolvedValue(new Response('gone', { status: 410 }));
+      vi.stubGlobal('fetch', mockFetch);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-ack-410',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-ack-410/ack?token=tok',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-ack-410/nack?token=tok',
+      });
+
+      await expect(delivery.ack!()).rejects.toThrow(CallbackError);
+      await expect(delivery.ack!()).rejects.toThrow('ack failed: 410');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('nack() returns applied:true on success', async () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-nack-ok',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const mockFetch = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ data: { status: 'nacked' } }), { status: 200 }),
+      );
+      vi.stubGlobal('fetch', mockFetch);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-nack-ok',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-nack-ok/ack?token=tok',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-nack-ok/nack?token=tok',
+      });
+
+      const result = await delivery.nack!({ error: 'processing failed' });
+      expect(result).toEqual({ applied: true, status: 'nacked' });
+
+      vi.unstubAllGlobals();
+    });
+
+    it('nack() returns applied:false on 409', async () => {
+      const key = 'test-key';
+      const timestamp = 1700000000;
+      const body = JSON.stringify({
+        id: 'hook-nack-409',
+        path: '/test',
+        data: {},
+        postAt: '',
+        postedAt: '',
+        createdAt: '',
+        updatedAt: '',
+      });
+      const sig = computeGoSignature(key, timestamp, body);
+
+      const mockFetch = vi.fn().mockResolvedValue(new Response('conflict', { status: 409 }));
+      vi.stubGlobal('fetch', mockFetch);
+
+      const signatures = new Signatures(key);
+      const delivery = signatures.parseDelivery(body, {
+        'posthook-id': 'hook-nack-409',
+        'posthook-timestamp': String(timestamp),
+        'posthook-signature': sig,
+        'posthook-ack-url': 'https://api.posthook.io/v1/hooks/hook-nack-409/ack?token=tok',
+        'posthook-nack-url': 'https://api.posthook.io/v1/hooks/hook-nack-409/nack?token=tok',
+      });
+
+      const result = await delivery.nack!();
+      expect(result).toEqual({ applied: false, status: 'conflict' });
+
+      vi.unstubAllGlobals();
     });
   });
 

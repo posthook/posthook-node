@@ -86,6 +86,13 @@ export class SignatureVerificationError extends PosthookError {
   }
 }
 
+export class CallbackError extends PosthookError {
+  constructor(message: string, status: number, headers?: Headers) {
+    super(message, status, 'callback_error', headers);
+    this.name = 'CallbackError';
+  }
+}
+
 /**
  * Creates the appropriate error subclass from an HTTP status and message.
  */

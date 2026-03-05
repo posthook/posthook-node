@@ -270,6 +270,48 @@ createServer((req, res) => {
 }).listen(3000);
 ```
 
+## Async Hooks
+
+When [async hooks](https://posthook.io/docs/essentials/async-hooks) are enabled, `parseDelivery()` returns `ack` and `nack` methods on the delivery object. Return 202 from your handler and call back when processing completes.
+
+```typescript
+app.post('/webhooks/process-video', express.raw({ type: '*/*' }), async (req, res) => {
+  const delivery = posthook.signatures.parseDelivery<{ videoId: string }>(
+    req.body,
+    req.headers,
+  );
+
+  res.status(202).end();
+  try {
+    await processVideo(delivery.data.videoId);
+    await delivery.ack();
+  } catch (err) {
+    await delivery.nack({ error: err.message });
+  }
+});
+```
+
+Both `ack()` and `nack()` return a `CallbackResult`:
+
+```typescript
+const result = await delivery.ack();
+console.log(result.applied); // true if state changed, false if already resolved
+console.log(result.status);  // "completed", "not_found", "conflict", etc.
+```
+
+`ack()` and `nack()` resolve without throwing for `200`, `404`, and `409` responses. They throw `CallbackError` for `401` (invalid token) and `410` (expired).
+
+If processing happens in a separate worker, use the raw callback URLs instead:
+
+```typescript
+// Pass URLs through your queue
+await queue.add('transcode', {
+  videoId: delivery.data.videoId,
+  ackUrl: delivery.ackUrl,
+  nackUrl: delivery.nackUrl,
+});
+```
+
 ## Handler response codes
 
 Posthook interprets your handler's HTTP response:

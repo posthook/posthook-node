@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { SignatureVerificationError } from '../errors.js';
-import type { PosthookDelivery } from '../types/common.js';
+import { CallbackError, SignatureVerificationError } from '../errors.js';
+import type { CallbackResult, PosthookDelivery } from '../types/common.js';
 
 const DEFAULT_TOLERANCE_SECONDS = 300; // 5 minutes
 
@@ -138,7 +138,7 @@ export class Signatures {
       );
     }
 
-    return {
+    const delivery: PosthookDelivery<T> = {
       hookId,
       timestamp,
       path: payload.path ?? '',
@@ -148,6 +148,61 @@ export class Signatures {
       createdAt: payload.createdAt ?? '',
       updatedAt: payload.updatedAt ?? '',
     };
+
+    // Enrich with async callback methods when Posthook-Ack-URL and Posthook-Nack-URL headers are present
+    const ackUrl = getHeader(headers, 'posthook-ack-url');
+    const nackUrl = getHeader(headers, 'posthook-nack-url');
+
+    if (ackUrl && nackUrl) {
+      delivery.ackUrl = ackUrl;
+      delivery.nackUrl = nackUrl;
+      delivery.ack = async (body?: unknown): Promise<CallbackResult> => {
+        const response = await fetch(ackUrl, {
+          method: 'POST',
+          headers: body != null ? { 'Content-Type': 'application/json' } : {},
+          body: body != null ? JSON.stringify(body) : undefined,
+        });
+        if (response.ok) {
+          const json = await response.json().catch(() => ({}));
+          const status = (json as Record<string, unknown>)?.data
+            ? ((json as Record<string, Record<string, unknown>>).data.status as string) ?? 'unknown'
+            : 'unknown';
+          return { applied: status === 'completed', status };
+        }
+        if (response.status === 404) return { applied: false, status: 'not_found' };
+        if (response.status === 409) return { applied: false, status: 'conflict' };
+        const text = await response.text().catch(() => '');
+        throw new CallbackError(
+          `ack failed: ${response.status}${text ? ': ' + text : ''}`,
+          response.status,
+          response.headers,
+        );
+      };
+      delivery.nack = async (body?: unknown): Promise<CallbackResult> => {
+        const response = await fetch(nackUrl, {
+          method: 'POST',
+          headers: body != null ? { 'Content-Type': 'application/json' } : {},
+          body: body != null ? JSON.stringify(body) : undefined,
+        });
+        if (response.ok) {
+          const json = await response.json().catch(() => ({}));
+          const status = (json as Record<string, unknown>)?.data
+            ? ((json as Record<string, Record<string, unknown>>).data.status as string) ?? 'unknown'
+            : 'unknown';
+          return { applied: status === 'nacked', status };
+        }
+        if (response.status === 404) return { applied: false, status: 'not_found' };
+        if (response.status === 409) return { applied: false, status: 'conflict' };
+        const text = await response.text().catch(() => '');
+        throw new CallbackError(
+          `nack failed: ${response.status}${text ? ': ' + text : ''}`,
+          response.status,
+          response.headers,
+        );
+      };
+    }
+
+    return delivery;
   }
 }
 

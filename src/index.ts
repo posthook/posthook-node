@@ -51,6 +51,7 @@ export {
   InternalServerError,
   ConnectionError,
   SignatureVerificationError,
+  CallbackError,
 } from './errors.js';
 
 // Types — options
@@ -79,4 +80,4 @@ export type {
 } from './types/hooks.js';
 
 // Types — common
-export type { PosthookDelivery } from './types/common.js';
+export type { PosthookDelivery, CallbackResult } from './types/common.js';
