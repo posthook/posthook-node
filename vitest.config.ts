@@ -11,6 +11,6 @@ export default defineConfig({
     },
   },
   define: {
-    __SDK_VERSION__: JSON.stringify('1.0.0-test'),
+    __SDK_VERSION__: JSON.stringify('0.0.0-test'),
   },
 });

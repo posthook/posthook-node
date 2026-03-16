@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { CallbackError, SignatureVerificationError } from '../errors.js';
+import type { Result } from './listener.js';
 import type { CallbackResult, PosthookDelivery } from '../types/common.js';
 
 const DEFAULT_TOLERANCE_SECONDS = 300; // 5 minutes
@@ -203,6 +204,66 @@ export class Signatures {
     }
 
     return delivery;
+  }
+
+  /**
+   * Create an Express-compatible middleware handler that verifies the
+   * signature, calls your handler, and maps the {@link Result} to an HTTP
+   * response.
+   *
+   * @example
+   * ```ts
+   * app.post(
+   *   '/webhooks/order',
+   *   express.raw({ type: '*\/*' }),
+   *   posthook.signatures.expressHandler(async (delivery) => {
+   *     await processOrder(delivery.data);
+   *     return Result.ack();
+   *   }),
+   * );
+   * ```
+   */
+  expressHandler(
+    handler: (delivery: PosthookDelivery) => Promise<Result>,
+  ): (req: { body: unknown; headers: Record<string, string | string[] | undefined> }, res: { status(code: number): { json(body: unknown): void }; set?(header: string, value: string): void }) => Promise<void> {
+    return async (req, res) => {
+      const body =
+        typeof req.body === 'string'
+          ? req.body
+          : Buffer.isBuffer(req.body)
+            ? req.body
+            : JSON.stringify(req.body);
+
+      let delivery: PosthookDelivery;
+      try {
+        delivery = this.parseDelivery(body, req.headers);
+      } catch (err) {
+        res.status(401).json({
+          error: err instanceof Error ? err.message : 'signature verification failed',
+        });
+        return;
+      }
+
+      try {
+        const result = await handler(delivery);
+        switch (result.kind) {
+          case 'ack':
+            res.status(200).json({ ok: true });
+            break;
+          case 'accept':
+            res.set?.('Posthook-Async-Timeout', String(result.timeout));
+            res.status(202).json({ ok: true });
+            break;
+          case 'nack':
+            res.status(500).json({ error: result.error?.message ?? 'handler failed' });
+            break;
+        }
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'handler failed',
+        });
+      }
+    };
   }
 }
 

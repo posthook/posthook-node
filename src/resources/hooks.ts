@@ -1,5 +1,6 @@
 import type { HttpClient } from '../http.js';
 import { NotFoundError } from '../errors.js';
+import { Listener, Stream } from './listener.js';
 import type { RequestOptions } from '../types/options.js';
 import type {
   Hook,
@@ -10,6 +11,7 @@ import type {
   BulkActionResult,
   QuotaInfo,
 } from '../types/hooks.js';
+import type { ListenHandler, ListenOptions, StreamOptions } from '../types/listener.js';
 
 /**
  * Sub-resource for bulk hook actions.
@@ -288,8 +290,8 @@ export class Hooks {
   }
 
   /**
-   * Delete a hook by ID. Returns silently if the hook is not found
-   * (already delivered or deleted).
+   * Delete a hook by ID. To cancel a pending hook, delete it before
+   * delivery. Idempotent — returns silently on 404 (already deleted).
    *
    * @example
    * ```ts
@@ -308,6 +310,48 @@ export class Hooks {
       }
       throw error;
     }
+  }
+
+  /**
+   * Open a persistent WebSocket connection and deliver incoming hooks to
+   * `handler`. Returns a {@link Listener} that stays connected (with
+   * automatic reconnection) until you call `listener.close()`.
+   *
+   * @example
+   * ```ts
+   * const listener = await posthook.hooks.listen(async (delivery) => {
+   *   console.log(delivery.hookId, delivery.data);
+   *   return Result.ack();
+   * });
+   *
+   * // Block until closed:
+   * await listener.wait();
+   * ```
+   */
+  async listen(handler: ListenHandler, options?: ListenOptions): Promise<Listener> {
+    const listener = new Listener(this.http, handler, options);
+    await listener.start();
+    return listener;
+  }
+
+  /**
+   * Open a persistent WebSocket connection and return an async-iterable
+   * {@link Stream} of deliveries. You must explicitly ack, accept, or nack
+   * each delivery.
+   *
+   * @example
+   * ```ts
+   * const stream = await posthook.hooks.stream();
+   * for await (const delivery of stream) {
+   *   console.log(delivery.hookId, delivery.data);
+   *   stream.ack(delivery.hookId);
+   * }
+   * ```
+   */
+  async stream(options?: StreamOptions): Promise<Stream> {
+    const stream = new Stream(this.http, options);
+    await stream.start();
+    return stream;
   }
 }
 

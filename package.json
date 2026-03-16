@@ -1,6 +1,6 @@
 {
   "name": "@posthook/node",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Official Posthook TypeScript SDK for scheduling and managing webhooks",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -38,9 +38,15 @@
     "webhooks",
     "scheduled-webhooks",
     "api",
-    "sdk"
+    "sdk",
+    "scheduling",
+    "delayed-jobs",
+    "cron-alternative"
   ],
   "author": "Posthook",
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -49,6 +55,7 @@
   "homepage": "https://posthook.io",
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.10",
     "@vitest/coverage-v8": "^3.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.5.0",

@@ -10,6 +10,9 @@ export { VERSION } from './version.js';
 // Standalone resources (for receive-only usage without an API key)
 export { Signatures };
 
+// WebSocket listener classes
+export { Result, Listener, Stream } from './resources/listener.js';
+
 /**
  * Create a standalone {@link Signatures} instance for verifying webhook
  * deliveries without a full Posthook client (no API key needed).
@@ -52,6 +55,7 @@ export {
   ConnectionError,
   SignatureVerificationError,
   CallbackError,
+  WebSocketError,
 } from './errors.js';
 
 // Types — options
@@ -80,4 +84,13 @@ export type {
 } from './types/hooks.js';
 
 // Types — common
-export type { PosthookDelivery, CallbackResult } from './types/common.js';
+export type { PosthookDelivery, CallbackResult, WebSocketMeta } from './types/common.js';
+
+// Types — listener
+export type {
+  ConnectionInfo,
+  ListenHandler,
+  ListenOptions,
+  StreamOptions,
+  ForwardRequest,
+} from './types/listener.js';

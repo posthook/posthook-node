@@ -8,7 +8,7 @@ The official Node.js/TypeScript SDK for [Posthook](https://posthook.io) — sche
 npm install @posthook/node
 ```
 
-**Requirements:** Node.js 18+ (uses native `fetch`). Zero runtime dependencies.
+**Requirements:** Node.js 18+ (uses native `fetch`). One runtime dependency (`ws`).
 
 ## Quick Start
 
@@ -36,9 +36,9 @@ Posthook delivers webhooks to `{your project domain}{path}`. Configure your doma
 
 ```typescript
 const posthook = new Posthook('pk_...', {
-  baseURL: 'https://api.posthook.io', // default
-  timeout: 30000,                      // default, in ms
-  signingKey: 'ph_sk_...',               // for verifying incoming deliveries
+  baseURL: 'https://api.posthook.io',  // default
+  timeout: 30000,                       // default, in ms
+  signingKey: 'ph_sk_...',              // for verifying incoming deliveries
 });
 ```
 
@@ -155,7 +155,7 @@ const hook = await posthook.hooks.get('hook-uuid');
 
 ### Delete a hook
 
-Deleting a hook that has already been delivered (404) is not an error — the call returns silently.
+To cancel a pending hook, delete it before delivery. Idempotent — a 404 (already deleted) is not an error and the call returns silently.
 
 ```typescript
 await posthook.hooks.delete('hook-uuid');
@@ -272,7 +272,7 @@ createServer((req, res) => {
 
 ## Async Hooks
 
-When [async hooks](https://posthook.io/docs/essentials/async-hooks) are enabled, `parseDelivery()` returns `ack` and `nack` methods on the delivery object. Return 202 from your handler and call back when processing completes.
+When [async hooks](https://docs.posthook.io/essentials/async-hooks) are enabled, `parseDelivery()` returns `ack` and `nack` methods on the delivery object. Return 202 from your handler and call back when processing completes.
 
 ```typescript
 app.post('/webhooks/process-video', express.raw({ type: '*/*' }), async (req, res) => {
@@ -310,6 +310,144 @@ await queue.add('transcode', {
   ackUrl: delivery.ackUrl,
   nackUrl: delivery.nackUrl,
 });
+```
+
+## WebSocket listener
+
+Receive hooks in real time over a persistent WebSocket connection instead of
+an HTTP endpoint. Enable WebSocket delivery in your project settings first.
+
+### Callback style (`listen`)
+
+Pass a handler function. The SDK manages the connection, heartbeat, and
+reconnection automatically.
+
+```typescript
+import Posthook, { Result } from '@posthook/node';
+
+const posthook = new Posthook('pk_...');
+
+const listener = await posthook.hooks.listen(async (delivery) => {
+  console.log(delivery.hookId, delivery.data);
+
+  // Return Result.ack() to mark success
+  return Result.ack();
+}, {
+  maxConcurrency: 5, // default: unlimited
+  onConnected: (info) => console.log('Connected:', info.projectName),
+  onDisconnected: (err) => console.log('Disconnected:', err?.message),
+  onReconnecting: (attempt) => console.log(`Reconnecting (attempt ${attempt})...`),
+});
+
+// Block until the listener is closed
+await listener.wait();
+```
+
+**Result types:**
+
+| Factory | Effect |
+|---------|--------|
+| `Result.ack()` | Processing complete — hook is marked as delivered immediately |
+| `Result.nack(error?)` | Reject — triggers retry according to project settings |
+| `Result.accept(timeoutSecs)` | Async — you have `timeoutSecs` to call back via HTTP (see below) |
+
+If your handler throws, the SDK automatically sends a `nack` with the error message.
+
+### Async processing with `accept`
+
+Use `accept` when your handler needs more time than the 10-second ack window
+(e.g., video processing, third-party API calls). After returning `accept`, you
+must POST to the callback URLs on the delivery to report the outcome:
+
+```typescript
+const listener = await posthook.hooks.listen(async (delivery) => {
+  // Kick off background work and accept immediately
+  backgroundQueue.add({ ...delivery.data, ackUrl: delivery.ackUrl, nackUrl: delivery.nackUrl });
+  return Result.accept(300); // 5 minutes to call back
+});
+
+// Later, in the background worker:
+await fetch(job.ackUrl, { method: 'POST' });
+// or on failure:
+await fetch(job.nackUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ error: 'failed' }) });
+```
+
+If neither URL is called before the deadline, the hook is retried.
+
+### Async iterator style (`stream`)
+
+For more control, use `stream()` which returns an `AsyncIterable`. You must
+explicitly ack, accept, or nack each delivery.
+
+```typescript
+const stream = await posthook.hooks.stream({
+  onConnected: (info) => console.log('Connected:', info.projectName),
+});
+
+for await (const delivery of stream) {
+  console.log(delivery.hookId, delivery.data);
+  console.log(delivery.ws?.attempt, 'of', delivery.ws?.maxAttempts);
+
+  stream.ack(delivery.hookId);
+  // or: stream.accept(delivery.hookId, 300);
+  // or: stream.nack(delivery.hookId, 'bad data');
+}
+```
+
+### HTTP fallback
+
+If your project has a domain configured, hooks are delivered via HTTP when no
+WebSocket listener is connected. You can run both an HTTP endpoint and a
+WebSocket listener — the server uses WebSocket when available and falls back to
+HTTP automatically. Since both paths use the same `Result` type, you can share
+your handler logic:
+
+```typescript
+async function processHook(delivery: PosthookDelivery): Promise<Result> {
+  await processOrder(delivery.data);
+  return Result.ack();
+}
+
+// HTTP delivery (Express endpoint)
+app.post('/webhooks/order', express.raw({ type: '*/*' }),
+  posthook.signatures.expressHandler(processHook));
+
+// WebSocket delivery (runs alongside)
+const listener = await posthook.hooks.listen(processHook);
+```
+
+### Connection lifecycle
+
+- **Reconnection:** On disconnect the SDK reconnects with exponential backoff
+  (`min(1s * 2^attempts, 30s)`), up to 10 attempts. The counter resets on a
+  successful connection.
+- **Heartbeat:** If no server activity is detected for 45 seconds the
+  connection is considered stale and force-closed for reconnection.
+- **Auth errors:** Close codes `4001` and `4003` abort immediately without
+  reconnecting.
+
+## Express handler
+
+`signatures.expressHandler()` wraps signature verification and `Result`
+dispatch into a single Express-compatible middleware:
+
+```typescript
+import express from 'express';
+import Posthook, { Result } from '@posthook/node';
+
+const app = express();
+const posthook = new Posthook('pk_...', { signingKey: 'ph_sk_...' });
+
+app.post(
+  '/webhooks/order',
+  express.raw({ type: '*/*' }),
+  posthook.signatures.expressHandler(async (delivery) => {
+    await processOrder(delivery.data);
+    return Result.ack();  // 200 { ok: true }
+    // Result.accept(60) -> 202 { ok: true }
+    // Result.nack('bad') -> 500 { error: 'bad' }
+  }),
+);
 ```
 
 ## Handler response codes
@@ -386,6 +524,7 @@ try {
 | `InternalServerError` | 500+ | `internal_error` |
 | `ConnectionError` | — | `connection_error` |
 | `SignatureVerificationError` | — | `signature_verification_error` |
+| `WebSocketError` | — | `websocket_error` |
 
 ## TypeScript
 
@@ -393,12 +532,18 @@ All types are exported from the package:
 
 ```typescript
 import Posthook, {
+  Result,
   type Hook,
   type HookScheduleParams,
   type HookListParams,
   type HookListAllParams,
   type Duration,
   type PosthookDelivery,
+  type WebSocketMeta,
+  type ConnectionInfo,
+  type ListenOptions,
+  type StreamOptions,
+  type ListenHandler,
   type QuotaInfo,
   type BulkActionResult,
   type BulkActionParams,
@@ -446,7 +591,15 @@ posthook.hooks.schedule({ path: '/test', postIn: '5m', postAt: '...' });
 posthook.hooks.schedule({ path: '/test', postAt: '...', timezone: 'US/Eastern' });
 ```
 
+## Resources
+
+- [Documentation](https://docs.posthook.io) — guides, concepts, and patterns
+- [API Reference](https://docs.posthook.io/api-reference/introduction) — endpoint specs and examples
+- [Quickstart](https://docs.posthook.io/quickstart) — get started in under 2 minutes
+- [Pricing](https://posthook.io/pricing) — free tier included
+- [Status](https://status.posthook.io) — uptime and incident history
+
 ## Requirements
 
 - Node.js 18+
-- Zero runtime dependencies
+- Runtime dependency: `ws` (WebSocket client)

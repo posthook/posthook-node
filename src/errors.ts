@@ -93,6 +93,13 @@ export class CallbackError extends PosthookError {
   }
 }
 
+export class WebSocketError extends PosthookError {
+  constructor(message: string) {
+    super(message, undefined, 'websocket_error');
+    this.name = 'WebSocketError';
+  }
+}
+
 /**
  * Creates the appropriate error subclass from an HTTP status and message.
  */

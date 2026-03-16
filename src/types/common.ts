@@ -1,3 +1,5 @@
+import type { ForwardRequest } from './listener.js';
+
 /**
  * Result of an ack or nack callback.
  *
@@ -21,6 +23,19 @@ export interface CallbackResult {
    * On no-op: `"completed"`, `"failed"`, `"not_found"`, or `"conflict"`.
    */
   status: string;
+}
+
+/**
+ * WebSocket-specific metadata attached to deliveries received via
+ * `hooks.listen()` or `hooks.stream()`.
+ */
+export interface WebSocketMeta {
+  /** Current delivery attempt number (1-based). */
+  attempt: number;
+  /** Maximum number of attempts before the hook is marked as failed. */
+  maxAttempts: number;
+  /** Pre-computed HTTP request data for forward mode. */
+  forwardRequest?: ForwardRequest;
 }
 
 /**
@@ -78,4 +93,10 @@ export interface PosthookDelivery<T = Record<string, unknown>> {
   ackUrl?: string;
   /** Raw nack callback URL. Pass to another process/service if needed. */
   nackUrl?: string;
+
+  /**
+   * WebSocket metadata. Present only on deliveries received via
+   * `hooks.listen()` or `hooks.stream()`.
+   */
+  ws?: WebSocketMeta;
 }

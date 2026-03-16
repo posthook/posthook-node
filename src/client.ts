@@ -1,5 +1,6 @@
 import { HttpClient } from './http.js';
 import { Hooks } from './resources/hooks.js';
+import { Result } from './resources/listener.js';
 import { Signatures } from './resources/signatures.js';
 import type { PosthookOptions } from './types/options.js';
 
@@ -23,6 +24,9 @@ const DEFAULT_TIMEOUT = 30_000;
  * ```
  */
 export class Posthook {
+  /** Result factories for WebSocket listener handlers. */
+  static readonly Result = Result;
+
   /** Schedule, list, get, delete, and bulk-manage hooks. */
   readonly hooks: Hooks;
 
